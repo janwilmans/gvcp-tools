@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ Returns with exitcode 1 if /....., otherwise 0 (success)
     Parses tcpdump output to verify GVCP traffic
-    see also: https://github.com/janwilmans/gvcp-tools
+    part of: https://github.com/janwilmans/gvcp-tools
 """
 import traceback
 import sys

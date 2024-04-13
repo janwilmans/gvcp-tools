@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ Returns with exitcode 1 if /....., otherwise 0 (success)
     discover GigE Vision devices and report information from them
-    see also: https://github.com/janwilmans/gvcp-tools
+    part of: https://github.com/janwilmans/gvcp-tools
 """
 
 import socket
