@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ Returns with exitcode 1 if /....., otherwise 0 (success)
-    Parses tcpdump output to verify GVCP traffic
+    discover GigE Vision devices and report information from them
+    see also: https://github.com/janwilmans/gvcp-tools
 """
 
 import socket
@@ -22,7 +23,7 @@ def as_hex(values):
 
 
 def is_discover_ask(data):
-    return True
+    return len(data) >= 4 and data[0:4] == b'\x00\x00\x00\x03'
 
 
 def get_uint16(data, offset, end):
@@ -150,7 +151,7 @@ def decode(data):
 
 
 def print_summary(response):
-    print(f"{response.vendor} {response.model} {response.device_version}, Serial: {response.serial_number}")
+    print(f"{response.current_ip:15} {response.netmask:15}: {response.vendor} {response.model} {response.device_version}, Serial: {response.serial_number}")
 
 
 def print_all_details(response):
@@ -175,7 +176,7 @@ def discover(broadcast_address):
     sock.settimeout(5)
 
     try:
-        print(f"broadcast GVCP Gige camera discover command on {broadcast_address}")
+        print(f"broadcast GVCP GigE Vision discover command on {broadcast_address}")
         # Send the GVCP discover message
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.sendto(discover_message, (broadcast_address, gvcp_port))
@@ -186,15 +187,14 @@ def discover(broadcast_address):
             if verbose > 2:
                 print(f"Received {addr}: {data.hex()}")
             # Check if the response is a DISCOVER_ACK
-            if len(data) >= 4 and data[0:4] == b'\x00\x00\x00\x03':
+            if is_discover_ask(data):
                 if verbose > 1:
                     print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
-                if is_discover_ask(data):
-                    response = decode(data)
-                    if verbose == 0:
-                        print_summary(response)
-                    if verbose >= 1:
-                        print_all_details(response)
+                response = decode(data)
+                if verbose == 0:
+                    print_summary(response)
+                if verbose >= 1:
+                    print_all_details(response)
 
     except socket.error as e:
         if str(e) != "timed out":
@@ -226,7 +226,7 @@ def get_broadcast_addresses():
     return result
 
 
-def GVCP_Discover(broadcast_addresses):
+def gvcp_discover(broadcast_addresses):
 
     threads = []
     for address in broadcast_addresses:
@@ -250,7 +250,7 @@ def main():
         show_usage()
         return 0
 
-    return GVCP_Discover(get_broadcast_addresses())
+    return gvcp_discover(get_broadcast_addresses())
 
 
 def show_usage():
@@ -261,7 +261,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        eprint("\ngige-discover stopped.")
+        print("\ngige-discover stopped.", file=sys.stderr)
         sys.exit(2)
     except Exception:
         traceback.print_exc(file=sys.stderr)
