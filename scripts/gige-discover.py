@@ -13,6 +13,7 @@ import ipaddress
 import threading
 
 verbose = 0
+gvcp_port = 3956
 
 
 def as_hex(values):
@@ -161,29 +162,25 @@ def print_all_details(response):
         print(f"  {key:32}: {value}")
 
 
-def discover(broadcast_address):
+def discover_multicast(multicast_address):
 
-    # Set up a UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # Define the GVCP port
-    gvcp_port = 3956
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # Define the GVCP discover message
     discover_message = b'\x42\x01\x00\x02\x00\x00\xff\xff'
 
     # Set a timeout for receiving responses (in seconds)
-    sock.settimeout(5)
+    udp_socket.settimeout(5)
 
     try:
-        print(f"broadcast GVCP GigE Vision discover command on {broadcast_address}")
+        print(f"GVCP GigE Vision multicast discover command to {multicast_address}")
         # Send the GVCP discover message
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(discover_message, (broadcast_address, gvcp_port))
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.sendto(discover_message, (multicast_address, gvcp_port))
 
         # Listen for responses
         while True:
-            data, addr = sock.recvfrom(1024)  # Buffer size is 1024 bytes
+            data, addr = udp_socket.recvfrom(1024)  # Buffer size is 1024 bytes
             if verbose > 2:
                 print(f"Received {addr}: {data.hex()}")
             # Check if the response is a DISCOVER_ACK
@@ -200,7 +197,46 @@ def discover(broadcast_address):
         if str(e) != "timed out":
             print("The Error:", e)
     finally:
-        sock.close()
+        udp_socket.close()
+
+
+def discover_broadcast(source_address):
+
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.bind((source_address, gvcp_port))
+
+    discover_broadcast_message = b'\x42\x19\x00\x02\x00\x00\xff\xff'
+    broadcast_address = "255.255.255.255"
+
+    # Set a timeout for receiving responses (in seconds)
+    udp_socket.settimeout(5)
+
+    try:
+        print(f"GVCP GigE Vision broadcast discover command from {source_address} to {broadcast_address}")
+        # Send the GVCP discover message
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.sendto(discover_broadcast_message, (broadcast_address, gvcp_port))
+
+        # Listen for responses
+        while True:
+            data, addr = udp_socket.recvfrom(1024)  # Buffer size is 1024 bytes
+            if verbose > 2:
+                print(f"Received {addr}: {data.hex()}")
+            # Check if the response is a DISCOVER_ACK
+            if is_discover_ask(data):
+                if verbose > 1:
+                    print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
+                response = decode(data)
+                if verbose == 0:
+                    print_summary(response)
+                if verbose >= 1:
+                    print_all_details(response)
+
+    except socket.error as e:
+        if str(e) != "timed out":
+            print("The Error:", e)
+    finally:
+        udp_socket.close()
 
 
 def calculate_broadcast_address(ip_with_subnet):
@@ -208,7 +244,12 @@ def calculate_broadcast_address(ip_with_subnet):
     return str(network.broadcast_address)
 
 
-def get_broadcast_addresses():
+def calculate_source_address(ip_with_subnet):
+    (address, _) = ip_with_subnet.split("/")
+    return address
+
+
+def get_ip_addresses():
     # Run the 'ip a' command and capture its output
     result = subprocess.run(['ip', 'a'], capture_output=True, text=True)
     output = result.stdout
@@ -220,17 +261,28 @@ def get_broadcast_addresses():
     for match in re.finditer(pattern, output):
         ip_addresses += list(match.groups(1))
 
+    return ip_addresses
+
+
+def get_multicast_addresses():
     result = []
-    for address in ip_addresses:
-        result += [calculate_broadcast_address(address)]
-    return result
+    for ip_address in get_ip_addresses():    # example: '172.16.2.1/24'
+        result += [calculate_broadcast_address(ip_address)]
+    return result   # example: '172.16.2.255'
 
 
-def gvcp_discover(broadcast_addresses):
+def get_source_addresses():
+    result = []
+    for ip_address in get_ip_addresses():   # example: '172.16.2.1/24'
+        result += [calculate_source_address(ip_address)]
+    return result  # example: '172.16.2.1'
+
+
+def gvcp_broadcast(source_addresses):
 
     threads = []
-    for address in broadcast_addresses:
-        thread = threading.Thread(target=discover, args=(address,))
+    for source_address in source_addresses:
+        thread = threading.Thread(target=discover_broadcast, args=(source_address,))
         thread.start()
         threads.append(thread)
 
@@ -238,8 +290,31 @@ def gvcp_discover(broadcast_addresses):
         thread.join()
 
 
+def gvcp_discover(multicast_addresses):
+
+    threads = []
+    for multicast_address in multicast_addresses:
+        thread = threading.Thread(target=discover_multicast, args=(multicast_address,))
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+
+def get_option_from_command_line(option):
+    if option in sys.argv:
+        index = sys.argv.index(option)
+        if len(sys.argv) > index + 1:
+            return sys.argv[index + 1]
+    return None
+
+
 def main():
     global verbose
+    broadcast = False
+    if "-b" in sys.argv:
+        broadcast = True
     if "-v" in sys.argv:
         verbose = 1
     if "-vv" in sys.argv:
@@ -250,7 +325,13 @@ def main():
         show_usage()
         return 0
 
-    return gvcp_discover(get_broadcast_addresses())
+    # source_address = get_option_from_command_line("-S")
+    # broadcast_address = get_option_from_command_line("-B")
+
+    if broadcast:
+        return gvcp_broadcast(get_source_addresses())
+    else:
+        return gvcp_discover(get_multicast_addresses())
 
 
 def show_usage():
