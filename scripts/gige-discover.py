@@ -10,6 +10,7 @@ import traceback
 import subprocess
 import re
 import ipaddress
+import struct
 import threading
 
 verbose = 0
@@ -30,7 +31,7 @@ def is_discover_ask(data):
 def get_uint16(data, offset, end):
     header = 44
     if end-offset != 1 or len(data) < (end-header):
-        print("get_uint16 error ", as_hex(data), offset, end)
+        print("get_uint16 error ", as_hex(data), offset-header, end-header)
         return 0
 
     offset -= header
@@ -127,6 +128,73 @@ class Response:
     user_defined_name = ""
 
 
+class Command(int):
+    Unreadable = 0
+    Discovery = 0x2
+    DiscoveryAck = 0x3
+    ReadReg = 0x80
+    ReadRegAck = 0x81
+    WriteReg = 0x82
+    WriteRegAck = 0x83
+    ReadMem = 0x84
+    ReadMemAck = 0x85
+
+
+class Device:
+    def __init__(self, response):
+        self.response = response
+
+    def address(self):
+        return self.response.current_ip
+
+    def evaluate_status(self, status):
+        GEV_STATUS_ACCESS_DENIED = 0x8006
+        if status == 0:
+            return
+        if (status == GEV_STATUS_ACCESS_DENIED):
+            print(f"  access denied! ({status:X})")
+        else:
+            print(f"  status: {status:X}")
+
+    def readreg_cmd(self, memory_address):
+        readreg_message = b'\x42\x01\x00\x80\x00\x04\x00\x4a'  # x04 - length, x00 x4a - req. id
+        readreg_message += struct.pack('>I', memory_address)
+        data = send_gvcp(self.address(), readreg_message)
+        status = get_uint16(data, 44, 45)
+        command = get_uint16(data, 46, 47)
+        # length = get_uint16(data, 48, 49)
+        # payload_id = get_uint16(data, 50, 51)
+        if status == 0 and command == Command.ReadRegAck:
+            return get_uint32(data, 52, 55)
+
+        print("readreg_cmd received invalid response.", data.hex())
+        return 0
+
+    def writereg_cmd(self, memory_address, value):
+        # print(f"writereg_cmd: {memory_address:X} = {value:X}")
+
+        writereg_message = b'\x42\x01\x00\x82\x00\x08\x00\x4b'  # x08 - length, x00 x4b - req. id
+        writereg_message += struct.pack('>I', memory_address)
+        writereg_message += struct.pack('>I', value)
+        data = send_gvcp(self.address(), writereg_message)
+        status = get_uint16(data, 44, 45)
+        command = get_uint16(data, 46, 47)
+        if command != Command.WriteRegAck:
+            print("writereg_cmd received invalid response.", data.hex())
+        self.evaluate_status(status)
+        return status
+
+    def reset(self):
+        print("ResetDevice:", self.address())
+        address = 0xfffffff0
+        value = self.readreg_cmd(address)
+        self.writereg_cmd(address, value | 0x1)  # or just force value 0x80000001
+
+    def summary(self):
+        response = self.response
+        return f"{response.current_ip:15} {response.netmask:15}: {response.vendor} {response.model} {response.device_version}, Serial: {response.serial_number}"
+
+
 def decode(data):
     result = Response()
     result.status = get_uint16(data, 44, 45)
@@ -151,15 +219,49 @@ def decode(data):
     return result
 
 
-def print_summary(response):
-    print(f"{response.current_ip:15} {response.netmask:15}: {response.vendor} {response.model} {response.device_version}, Serial: {response.serial_number}")
-
-
-def print_all_details(response):
+def print_all_details(device):
     print("Response from device:")
-    response_members = vars(response)
+    response_members = vars(device.response)
     for key, value in response_members.items():
         print(f"  {key:32}: {value}")
+
+
+def handle_incoming_udp(data, addr):
+    if verbose > 2:
+        print(f"Received {addr}: {data.hex()}")
+    # Check if the response is a DISCOVER_ACK
+    if is_discover_ask(data):
+        if verbose > 1:
+            print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
+        device = Device(decode(data))
+        if verbose == 0:
+            print(device.summary())
+        if verbose >= 1:
+            print_all_details(device)
+
+
+def send_gvcp(address, data):
+
+    # print(f"send_gvcp: ", address, data.hex())
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # Set a timeout for receiving responses (in seconds)
+    udp_socket.settimeout(5)
+
+    response_data = []
+    try:
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.sendto(data, (address, gvcp_port))
+
+        response_data, _ = udp_socket.recvfrom(1024)
+
+    except socket.error as e:
+        if str(e) != "timed out":
+            print("The Error:", e)
+    finally:
+        udp_socket.close()
+
+    return response_data
 
 
 def discover_multicast(multicast_address):
@@ -167,6 +269,9 @@ def discover_multicast(multicast_address):
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # Define the GVCP discover message
+    # x42\x01 means:
+    # x42 == Discover message key
+    # x01 == Acknowledge Required
     discover_message = b'\x42\x01\x00\x02\x00\x00\xff\xff'
 
     # Set a timeout for receiving responses (in seconds)
@@ -180,18 +285,8 @@ def discover_multicast(multicast_address):
 
         # Listen for responses
         while True:
-            data, addr = udp_socket.recvfrom(1024)  # Buffer size is 1024 bytes
-            if verbose > 2:
-                print(f"Received {addr}: {data.hex()}")
-            # Check if the response is a DISCOVER_ACK
-            if is_discover_ask(data):
-                if verbose > 1:
-                    print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
-                response = decode(data)
-                if verbose == 0:
-                    print_summary(response)
-                if verbose >= 1:
-                    print_all_details(response)
+            data, addr = udp_socket.recvfrom(1024)
+            handle_incoming_udp(data, addr)
 
     except socket.error as e:
         if str(e) != "timed out":
@@ -205,6 +300,10 @@ def discover_broadcast(source_address):
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.bind((source_address, gvcp_port))
 
+    # Define the GVCP discover message
+    # x42\x01 means:
+    # x42 == Discover message key
+    # x19 == x01 (Acknowledge Required) + x10 (Allow Broadcast Acknowledge) + x08 (Unknown!)
     discover_broadcast_message = b'\x42\x19\x00\x02\x00\x00\xff\xff'
     broadcast_address = "255.255.255.255"
 
@@ -219,18 +318,8 @@ def discover_broadcast(source_address):
 
         # Listen for responses
         while True:
-            data, addr = udp_socket.recvfrom(1024)  # Buffer size is 1024 bytes
-            if verbose > 2:
-                print(f"Received {addr}: {data.hex()}")
-            # Check if the response is a DISCOVER_ACK
-            if is_discover_ask(data):
-                if verbose > 1:
-                    print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
-                response = decode(data)
-                if verbose == 0:
-                    print_summary(response)
-                if verbose >= 1:
-                    print_all_details(response)
+            data, addr = udp_socket.recvfrom(1024)
+            handle_incoming_udp(data, addr)
 
     except socket.error as e:
         if str(e) != "timed out":
@@ -325,8 +414,11 @@ def main():
         show_usage()
         return 0
 
-    # source_address = get_option_from_command_line("-S")
-    # broadcast_address = get_option_from_command_line("-B")
+    # needle = get_option_from_command_line("-r")
+    # if needle != "":
+
+        # source_address = get_option_from_command_line("-S")
+        # broadcast_address = get_option_from_command_line("-B")
 
     if broadcast:
         return gvcp_broadcast(get_source_addresses())
