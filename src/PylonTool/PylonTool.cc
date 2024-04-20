@@ -1,6 +1,6 @@
 /*
  * This is a camera duration test, it reports statistics at the end
- * part of: https://github.com/janwilmans/gvcp-tools 
+ * part of: https://github.com/janwilmans/gvcp-tools
  */
 
 #include <docopt.h>
@@ -21,7 +21,6 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <source_location>
 #include <string>
 #include <thread>
 
@@ -48,7 +47,6 @@ struct AlreadyHandledException : std::exception
 };
 
 bool g_verbose = false;
-
 
 template <>
 struct fmt::formatter<Pylon::String_t> : public fmt::formatter<std::string>
@@ -78,7 +76,7 @@ struct fmt::formatter<Pylon::String_t> : public fmt::formatter<std::string>
 }
 
 // Prints the exception message, except if it is an 'already handled' exception (because then it was already printed)
-void PrintExceptions(const std::source_location location = std::source_location::current())
+void PrintExceptions(const char * function_name)
 {
     try
     {
@@ -86,7 +84,7 @@ void PrintExceptions(const std::source_location location = std::source_location:
     }
     catch (const GenICam::GenericException & e)
     {
-        fmt::print("{} GenericException #1 '{}' in function '{}'\n", GetTimeStamp(), e.what(), location.function_name());
+        fmt::print("{} GenericException #1 '{}' in function '{}'\n", GetTimeStamp(), e.what(), function_name);
     }
     catch (const AlreadyHandledException &)
     {
@@ -94,11 +92,11 @@ void PrintExceptions(const std::source_location location = std::source_location:
     }
     catch (const std::exception & e)
     {
-        fmt::print("{} Exception '{}' in function '{}'\n", GetTimeStamp(), e.what(), location.function_name());
+        fmt::print("{} Exception '{}' in function '{}'\n", GetTimeStamp(), e.what(), function_name);
     }
     catch (...)
     {
-        fmt::print("{} Exception '...' in function '{}'\n", GetTimeStamp(), location.function_name());
+        fmt::print("{} Exception '...' in function '{}'\n", GetTimeStamp(), function_name);
     }
 }
 
@@ -113,7 +111,7 @@ void CheckedExecutionTime(std::string name, std::function<void()> func, int64_t 
     }
     catch (...)
     {
-        PrintExceptions();
+        PrintExceptions(__func__);
     }
 
     const auto end = std::chrono::steady_clock::now();
@@ -186,7 +184,6 @@ public:
         fmt::print("  Firmware Version: {}\n", firmware);
         m_context = fmt::format("{} with serial {}", firmware, GetSerialNumber());
 
-
         CheckedExecutionTime(fmt::format("SetInitialParameters {}", GetContext()), [&] { SetInitialParameters(); });
         CheckedExecutionTime(fmt::format("SetupStreamGrabber {}", GetContext()), [&] { SetupStreamGrabber(); });
     }
@@ -252,8 +249,7 @@ public:
             {
                 CheckedExecutionTime(fmt::format("AcquisitionStop {}", GetContext()), [&] { GigECamera->AcquisitionStart.Execute(); });
                 CheckedExecutionTime(fmt::format("AcquisitionStart {}", GetContext()), [&] { GigECamera->AcquisitionStart.Execute(); });
-            }
-        });
+            } });
     }
 
     void StopStartLoopJoin()
@@ -340,8 +336,7 @@ public:
             catch (...)
             {
                 fmt::print(stderr, "unexpected ... exception!\n");
-            }
-        });
+            } });
     }
 
     static const auto one_minute_ms = 60 * 1000;
@@ -389,7 +384,7 @@ public:
                 m_lastRetryTimestamp = now;
                 if (retries > 0)
                 {
-                    averages += std::format(", {} minutes since last retry", timeSinceLastRetry / one_minute_ms);
+                    averages += fmt::format(", {} minutes since last retry", timeSinceLastRetry / one_minute_ms);
                 }
                 Log(fmt::format("Read/Write {} retries in {} minutes, {}", retries, elapsedMs / one_minute_ms, averages));
             }
@@ -811,7 +806,7 @@ int main(int argc, char * argv[])
     }
     catch (...)
     {
-        PrintExceptions();
+        PrintExceptions(__func__);
     }
 
     return 0;
