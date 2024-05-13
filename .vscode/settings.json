@@ -1,0 +1,29 @@
+{
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "file",
+    "cmake.clearOutputBeforeBuild": false,
+    "cmake.buildDirectory": "${workspaceFolder}/build/${buildType}",
+    "cmake.defaultVariants": {
+        "buildType": {
+            "default": "release",
+            "description": "The build type.",
+            "choices": {
+                "debug": {
+                    "short": "debug",
+                    "long": "Disable optimizations - include debug information.",
+                    "buildType": "debug"
+                },
+                "release": {
+                    "short": "release",
+                    "long": "Optimize for speed - exclude debug information.",
+                    "buildType": "release"
+                }
+            }
+        }
+    },
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "cmake.configureOnOpen": true,
+    "python.formatting.autopep8Args": ["--max-line-length=160"],
+    "autopep8.args": ["--max-line-length", "160"],
+    "cSpell.words": ["gvcp", "wireshark", "gige"]
+}

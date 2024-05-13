@@ -11,7 +11,7 @@ import subprocess
 import re
 import ipaddress
 import struct
-import threading
+import time
 
 verbose = 0
 gvcp_port = 3956
@@ -30,37 +30,37 @@ def is_discover_ask(data):
 
 def get_uint16(data, offset, end):
     header = 44
-    if end-offset != 1 or len(data) < (end-header):
-        print("get_uint16 error ", as_hex(data), offset-header, end-header)
+    if end - offset != 1 or len(data) < (end - header):
+        print("get_uint16 error ", as_hex(data), offset - header, end - header)
         return 0
 
     offset -= header
-    return 256 * data[offset] + data[offset+1]
+    return 256 * data[offset] + data[offset + 1]
 
 
 def get_two_uint16(data, offset, end):
     header = 44
-    if end-offset != 3 or len(data) < (end-header):
+    if end - offset != 3 or len(data) < (end - header):
         print("get_two_uint16 error ", as_hex(data), offset, end)
         return 0
 
     offset -= header
-    return (0x100 * data[offset]) + data[offset+1], (0x100 * data[offset+2]) + data[offset+3]
+    return (0x100 * data[offset]) + data[offset + 1], (0x100 * data[offset + 2]) + data[offset + 3]
 
 
 def get_uint32(data, offset, end):
     header = 44
-    if end-offset != 3 or len(data) < (end-header):
+    if end - offset != 3 or len(data) < (end - header):
         print("get_uint32 error ", as_hex(data), offset, end)
         return 0
 
     offset -= header
-    return (0x1000000 * data[offset]) + (0x10000 * data[offset+1]) + (0x100 * data[offset+2]) + data[offset+3]
+    return (0x1000000 * data[offset]) + (0x10000 * data[offset + 1]) + (0x100 * data[offset + 2]) + data[offset + 3]
 
 
 def get_hex_bytes(data, offset, end):
     header = 44
-    if len(data) < (end-header):
+    if len(data) < (end - header):
         print("get_hex_bytes error ", as_hex(data), offset, end)
         return []
 
@@ -69,28 +69,28 @@ def get_hex_bytes(data, offset, end):
     hex_data = data.hex()
     result = []
     for i in range(0, 6):
-        index = (offset*2) + (i*2)
-        result += [hex_data[index:index+2]]
+        index = (offset * 2) + (i * 2)
+        result += [hex_data[index:index + 2]]
     return result
 
 
 def get_decimal_bytes(data, offset, end):
     header = 44
-    if len(data) < (end-header):
+    if len(data) < (end - header):
         print("get_decimal_bytes error ", as_hex(data), offset, end)
         return []
 
     offset -= header
 
     result = []
-    for index in range(offset, offset+4):
+    for index in range(offset, offset + 4):
         result += [str(data[index])]
     return result
 
 
 def get_string(data, offset, end):
     header = 44
-    if len(data) < (end-header):
+    if len(data) < (end - header):
         print("get_bytes error ", as_hex(data), offset, end)
         return []
 
@@ -264,40 +264,11 @@ def send_gvcp(address, data):
     return response_data
 
 
-def discover_multicast(multicast_address):
+def send_broadcast(source_address):
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    # Define the GVCP discover message
-    # x42\x01 means:
-    # x42 == Discover message key
-    # x01 == Acknowledge Required
-    discover_message = b'\x42\x01\x00\x02\x00\x00\xff\xff'
-
-    # Set a timeout for receiving responses (in seconds)
-    udp_socket.settimeout(5)
-
-    try:
-        print(f"GVCP GigE Vision multicast discover command to {multicast_address}")
-        # Send the GVCP discover message
-        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        udp_socket.sendto(discover_message, (multicast_address, gvcp_port))
-
-        # Listen for responses
-        while True:
-            data, addr = udp_socket.recvfrom(1024)
-            handle_incoming_udp(data, addr)
-
-    except socket.error as e:
-        if str(e) != "timed out":
-            print("The Error:", e)
-    finally:
-        udp_socket.close()
-
-
-def discover_broadcast(source_address):
-
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     udp_socket.bind((source_address, gvcp_port))
 
     # Define the GVCP discover message
@@ -306,26 +277,8 @@ def discover_broadcast(source_address):
     # x19 == x01 (Acknowledge Required) + x10 (Allow Broadcast Acknowledge) + x08 (Unknown!)
     discover_broadcast_message = b'\x42\x19\x00\x02\x00\x00\xff\xff'
     broadcast_address = "255.255.255.255"
-
-    # Set a timeout for receiving responses (in seconds)
-    udp_socket.settimeout(5)
-
-    try:
-        print(f"GVCP GigE Vision broadcast discover command from {source_address} to {broadcast_address}")
-        # Send the GVCP discover message
-        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        udp_socket.sendto(discover_broadcast_message, (broadcast_address, gvcp_port))
-
-        # Listen for responses
-        while True:
-            data, addr = udp_socket.recvfrom(1024)
-            handle_incoming_udp(data, addr)
-
-    except socket.error as e:
-        if str(e) != "timed out":
-            print("The Error:", e)
-    finally:
-        udp_socket.close()
+    udp_socket.sendto(discover_broadcast_message, (broadcast_address, gvcp_port))
+    udp_socket.close()
 
 
 def calculate_broadcast_address(ip_with_subnet):
@@ -353,7 +306,7 @@ def get_ip_addresses():
     return ip_addresses
 
 
-def get_multicast_addresses():
+def get_subnet_addresses():
     result = []
     for ip_address in get_ip_addresses():    # example: '172.16.2.1/24'
         result += [calculate_broadcast_address(ip_address)]
@@ -367,28 +320,29 @@ def get_source_addresses():
     return result  # example: '172.16.2.1'
 
 
-def gvcp_broadcast(source_addresses):
+def gvcp_discover(source_addresses):
 
-    threads = []
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    udp_socket.bind(("0.0.0.0", gvcp_port))
+
     for source_address in source_addresses:
-        thread = threading.Thread(target=discover_broadcast, args=(source_address,))
-        thread.start()
-        threads.append(thread)
+        send_broadcast(source_address)
 
-    for thread in threads:
-        thread.join()
+    udp_socket.settimeout(2)
+    start_time = time.monotonic()
+    try:
+        # Listen for responses
+        while ((time.monotonic() - start_time) < 2):
+            data, addr = udp_socket.recvfrom(1024)
+            handle_incoming_udp(data, addr)
 
-
-def gvcp_discover(multicast_addresses):
-
-    threads = []
-    for multicast_address in multicast_addresses:
-        thread = threading.Thread(target=discover_multicast, args=(multicast_address,))
-        thread.start()
-        threads.append(thread)
-
-    for thread in threads:
-        thread.join()
+    except socket.error as e:
+        if str(e) != "timed out":
+            print("The Error:", e)
+    finally:
+        udp_socket.close()
 
 
 def get_option_from_command_line(option):
@@ -401,9 +355,6 @@ def get_option_from_command_line(option):
 
 def main():
     global verbose
-    broadcast = False
-    if "-b" in sys.argv:
-        broadcast = True
     if "-v" in sys.argv:
         verbose = 1
     if "-vv" in sys.argv:
@@ -414,16 +365,7 @@ def main():
         show_usage()
         return 0
 
-    # needle = get_option_from_command_line("-r")
-    # if needle != "":
-
-        # source_address = get_option_from_command_line("-S")
-        # broadcast_address = get_option_from_command_line("-B")
-
-    if broadcast:
-        return gvcp_broadcast(get_source_addresses())
-    else:
-        return gvcp_discover(get_multicast_addresses())
+    return gvcp_discover(get_source_addresses())
 
 
 def show_usage():
