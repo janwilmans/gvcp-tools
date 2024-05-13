@@ -15,6 +15,7 @@ import time
 
 verbose = 0
 gvcp_port = 3956
+camera_count = 0
 
 
 def as_hex(values):
@@ -227,6 +228,7 @@ def print_all_details(device):
 
 
 def handle_incoming_udp(data, addr):
+    global camera_count
     if verbose > 2:
         print(f"Received {addr}: {data.hex()}")
     # Check if the response is a DISCOVER_ACK
@@ -234,6 +236,7 @@ def handle_incoming_udp(data, addr):
         if verbose > 1:
             print(f"Received DISCOVER_ACK {addr}: {len(data)} {data.hex()}")
         device = Device(decode(data))
+        camera_count = camera_count + 1
         if verbose == 0:
             print(device.summary())
         if verbose >= 1:
@@ -321,6 +324,8 @@ def get_source_addresses():
 
 
 def gvcp_discover(source_addresses):
+    global camera_count
+    camera_count = 0
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -343,6 +348,7 @@ def gvcp_discover(source_addresses):
             print("The Error:", e)
     finally:
         udp_socket.close()
+        print(f"Found {camera_count} cameras.")
 
 
 def get_option_from_command_line(option):
