@@ -2,7 +2,7 @@
 # This is a camera duration test, it reports statistics at the end
 # part of: https://github.com/janwilmans/gvcp-tools 
 #
-project(PylonTool)
+project(Pylontool)
 
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
@@ -74,7 +74,7 @@ endif()
 #add_link_options(-fsanitize=thread)
 
 add_executable(PylonTool
-    PylonTool.cc
+    Pylontool.cc
 )
 
 find_package(Threads REQUIRED)

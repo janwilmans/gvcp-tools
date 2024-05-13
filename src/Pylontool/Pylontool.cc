@@ -181,8 +181,10 @@ public:
             CheckedExecutionTime(fmt::format("Open {}", GetSerialNumber()), [&] { GigECamera->Open(); });
         }
         auto firmware = std::string(GigECamera->DeviceFirmwareVersion.GetValue().c_str());
-        fmt::print("  Firmware Version: {}\n", firmware);
         m_context = fmt::format("{} with serial {}", firmware, GetSerialNumber());
+        m_frequency = GigECamera->GevTimestampTickFrequency.GetValue(false, true);
+
+        fmt::print("  Firmware Version: {}, Uptime: {}\n", firmware, std::chrono::duration_cast<std::chrono::seconds>(GetUptime()));
 
         CheckedExecutionTime(fmt::format("SetInitialParameters {}", GetContext()), [&] { SetInitialParameters(); });
         CheckedExecutionTime(fmt::format("SetupStreamGrabber {}", GetContext()), [&] { SetupStreamGrabber(); });
@@ -358,9 +360,59 @@ public:
         GigECamera->DeviceReset.Execute();
     }
 
-    void SetToStaticIP()
+    /*
+        The valid values for 'GevCurrentIPConfiguration' are poorly documented, but from
+        packet inspection we see that the pylon5 IpConfiguration tool sets only one 'bit' active at one time.
+
+        VCenter however, sets the value to 7, which is odd but, maybe it was valid in the past?
+        One possible meaning of '7' could be: try DHCP, fallback to LLA and persist address once received.
+        However this was never found in official documentation
+
+        // VCenter sets the value 7
+        4 == LLA
+        2 == DHCP
+        1 == Persistent IP / Static IP
+    */
+    void SetToLLA()
     {
-        GigECamera->GevCurrentIPConfiguration = 7; // deprecated
+        auto previous = GigECamera->GevCurrentIPConfiguration.GetValue(false, true);
+        // GigECamera->GevSupportedIPConfigurationPersistentIP.SetValue(false);
+        // GigECamera->GevSupportedIPConfigurationDHCP.SetValue(false);
+        // GigECamera->GevSupportedIPConfigurationLLA.SetValue(true);
+        GigECamera->GevCurrentIPConfiguration = 4;
+        fmt::print("Changed GevCurrentIPConfiguration from {} to {}\n", previous, GigECamera->GevCurrentIPConfiguration.GetValue(false, true));
+    }
+
+    void SetToLLAPersist()
+    {
+        auto previous = GigECamera->GevCurrentIPConfiguration.GetValue(false, true);
+        GigECamera->GevCurrentIPConfiguration = 5;
+        fmt::print("Changed GevCurrentIPConfiguration from {} to {}\n", previous, GigECamera->GevCurrentIPConfiguration.GetValue(false, true));
+    }
+
+    void SetToDHCP()
+    {
+        auto previous = GigECamera->GevCurrentIPConfiguration.GetValue(false, true);
+        // GigECamera->GevSupportedIPConfigurationPersistentIP.SetValue(false);
+        // GigECamera->GevSupportedIPConfigurationLLA.SetValue(false);
+        // GigECamera->GevSupportedIPConfigurationDHCP.SetValue(true);
+        GigECamera->GevCurrentIPConfiguration = 2;
+        fmt::print("Changed GevCurrentIPConfiguration from {} to {}\n", previous, GigECamera->GevCurrentIPConfiguration.GetValue(false, true));
+    }
+
+    std::chrono::nanoseconds GetUptime()
+    {
+        auto nanoseconds_per_second = 1000000000;
+        auto nanoseconds_per_tick = nanoseconds_per_second / m_frequency;
+
+        GigECamera->GevTimestampControlLatch.Execute();
+        auto timestamp = GigECamera->GevTimestampValue.GetValue();
+        return std::chrono::nanoseconds(timestamp * nanoseconds_per_tick);
+    }
+
+    void TimestampControlReset()
+    {
+        GigECamera->GevTimestampControlReset.Execute();
     }
 
     void Log(std::string_view text)
@@ -603,6 +655,7 @@ private:
     std::thread m_captureThread;
     std::string m_serialNumber;
     std::string m_context;
+    int64_t m_frequency;
 
     Pylon::ITransportLayer * transportLayer;
     Pylon::CDeviceInfo * deviceInfo;
@@ -647,6 +700,11 @@ public:
     }
 
     [[nodiscard]] const std::vector<std::unique_ptr<Camera>> & GetCameras() const
+    {
+        return m_cameras;
+    }
+
+    [[nodiscard]] std::vector<std::unique_ptr<Camera>> & GetCamerasModifiable()
     {
         return m_cameras;
     }
@@ -736,7 +794,11 @@ Tests:
   0 = Information info
   1 = capture as vcenter would
   2 = StopStartAcquisition loop
-  3 = Reset All cameras
+  3 = Reset cameras
+  4 = Set cameras to LLA mode
+  5 = Set cameras to LLA+persist mode (experimental, not recommended)
+  6 = Set cameras to DHCP mode
+  7 = TimestampControlReset cameras
 )";
 
 int main(int argc, char * argv[])
@@ -783,21 +845,63 @@ int main(int argc, char * argv[])
 
         if (test_number == 3)
         {
-            for (auto & camera : cameras)
+            for (auto & camera : cameraDiscoverer.GetCamerasModifiable())
             {
-                fmt::print("Resetting {}.\n", camera->GetContext());
                 camera->Open();
+                fmt::print("Resetting {}.\n", camera->GetContext());
                 camera->DeviceReset();
-                exit(1);
+                camera.release();
             }
         }
-
         if (test_number == 4)
         {
             for (auto & camera : cameras)
             {
-                fmt::print("Set GevCurrentIPConfiguration = 7 for {}.\n", camera->GetContext());
-                camera->SetToStaticIP();
+                camera->Open();
+            }
+
+            for (auto & camera : cameras)
+            {
+                fmt::print("Set GevCurrentIPConfiguration = 4 (LLA) for {}.\n", camera->GetContext());
+                camera->SetToLLA();
+            }
+        }
+        if (test_number == 5)
+        {
+            for (auto & camera : cameras)
+            {
+                camera->Open();
+            }
+            for (auto & camera : cameras)
+            {
+                fmt::print("Set GevCurrentIPConfiguration = 5 (LLA + persistence) for {}.\n", camera->GetContext());
+                camera->SetToLLAPersist();
+            }
+        }
+
+        if (test_number == 6)
+        {
+            for (auto & camera : cameras)
+            {
+                camera->Open();
+            }
+            for (auto & camera : cameras)
+            {
+                fmt::print("Set GevCurrentIPConfiguration = 2 (DHCP) for {}.\n", camera->GetContext());
+                camera->SetToDHCP();
+            }
+        }
+
+        if (test_number == 7)
+        {
+            fmt::print("TimestampControlReset Cameras...\n");
+            for (auto & camera : cameras)
+            {
+                camera->Open();
+            }
+            for (auto & camera : cameras)
+            {
+                camera->TimestampControlReset();
             }
         }
 
