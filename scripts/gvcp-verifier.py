@@ -9,6 +9,10 @@ import re
 from datetime import datetime
 
 verbose = 0
+measure_latency = False
+verbose_report_late = True
+
+# see 'GVCP_Parser.Late' to configure what is considered a 'late' response, default is 20ms, but that is completely arbitrary
 
 
 def eprint(*args, **kwargs):
@@ -26,8 +30,11 @@ def get_timestamp():
 
 
 def show_usage():
-    eprint("Usage: tcpdump -i eth0 udp port 3956 -X -ttttt -v | " + sys.argv[0] + " [-vvvvv] [-h]")
-    eprint("  note: normal output reports only 'unusually late' replies, all normal traffic is ignored.\n")
+    eprint("Usage: tcpdump -i eth0 udp port 3956 -X -ttttt -v | " + sys.argv[0] + " [-vvvvv] [-h] [-m]")
+    eprint("  notes:")
+    eprint("   - normal output reports only 'unusually late' replies, all normal traffic is ignored.")
+    eprint("   - AcquisitionStop is slower then most commands, because it waits for the image-in-progress to complete")
+    eprint("")
 
 
 def remove_empty(list_of_strings):
@@ -84,24 +91,60 @@ def get_uint32(data, offset, end):
     offset -= ip_header
     return (0x1000000 * data[offset]) + (0x10000 * data[offset+1]) + (0x100 * data[offset+2]) + data[offset+3]
 
-
+# see https://sources.debian.org/src/wireshark/1.12.1+g01b65bf-4+deb8u14/epan/dissectors/packet-gvcp.c/
+# see https://www.automate.org/vision/vision-standards/vision-standards-gige-vision
+# see https://gitlab.vimec.nl/Vimec/packages-repo/-/tree/0366ae0653102c7549d6e49c507dd6c992a918dc/documentation/GigE-Vision-Specification_2-2-00.pdf
 class Command(int):
 
     Unreadable = 0
     Discovery = 0x2
     DiscoveryAck = 0x3
+
+    ForceIP = 0x4
+    ForceIPAck = 0x5
+
+#   16.7 PACKETRESEND
+#   Packet resend can be used (when supported) to request the retransmission of packets that have been lost.
+#   This command is different from other GVCP commands since it can be fired asynchronously by the
+#   application. Therefore, the application can issue this command even if it is waiting for the acknowledge
+#   message from the previous command. This allows fast retransmission of stream data.
+
+    PacketResend = 0x40
+    PacketResendAck = 0x41
     ReadReg = 0x80
     ReadRegAck = 0x81
     WriteReg = 0x82
     WriteRegAck = 0x83
     ReadMem = 0x84
     ReadMemAck = 0x85
+    WriteMem = 0x86
+    WriteMemAck = 0x87
+
+#   Command 0x88 is not missing, it does not exist.
+#   PendingAck (0x89) below means another command is taking 'longer' then expected,
+#   signalling to the application to wait longer and not time out.
+
+    PendingAck = 0x89
+    Event = 0xc0
+    EventAck = 0xc1
+    EventData = 0xc2
+    EventDataAck = 0xc3
+    Action = 0x100
+    ActionAck = 0x101
 
     def as_string(self):
         if self == Command.Discovery:
             return "DISCOVERY_CMD"
         if self == Command.DiscoveryAck:
-            return " DISCOVERY_ACK"
+            return "DISCOVERY_ACK"
+        if self == Command.ForceIP:
+            return "FORCEIP_CMD"
+        if self == Command.ForceIPAck:
+            return "FORCEIP_ACK"
+        if self == Command.PacketResend:
+            return "PACKETRESEND_CMD"
+        if self == Command.PacketResendAck:
+            return "PACKETRESEND_ACK"
         if self == Command.ReadReg:
             return " READREG_CMD"
         if self == Command.ReadRegAck:
@@ -111,26 +154,57 @@ class Command(int):
         if self == Command.WriteRegAck:
             return "WRITEREG_ACK"
         if self == Command.ReadMem:
-            return "READMEM_CMD"
+            return " READMEM_CMD"
         if self == Command.ReadMemAck:
-            return "READMEM_ACK"
+            return " READMEM_ACK"
+        if self == Command.WriteMem:
+            return "WRITEMEM_CMD"
+        if self == Command.WriteMemAck:
+            return "WRITEMEM_ACK"
+        if self == Command.PendingAck:
+            return "PENDING_ACK"
+        if self == Command.Event:
+            return "EVENT_CMD"
+        if self == Command.EventAck:
+            return "EVENT_ACK"
+        if self == Command.EventData:
+            return "EVENTDATA_CMD"
+        if self == Command.EventDataAck:
+            return "EVENTDATA_ACK"
+        if self == Command.Action:
+            return "ACTION_CMD"
+        if self == Command.ActionAck:
+            return "ACTION_ACK"
         return f"[{self:04X}]"
 
 
 def get_cmd_for_reply(reply):
-
     command = reply.command
     if command == Command.DiscoveryAck:
         return Command.Discovery
-    if command == Command.ReadMemAck:
-        return Command.ReadMem
+    if command == Command.ForceIPAck:
+        return Command.ForceIP
+    if command == Command.PacketResendAck:
+        return Command.PacketResend
     if command == Command.ReadRegAck:
         return Command.ReadReg
     if command == Command.WriteRegAck:
         return Command.WriteReg
+    if command == Command.ReadMemAck:
+        return Command.ReadMem
+    if command == Command.WriteMemAck:
+        return Command.WriteMem
+    if command == Command.PendingAck:
+        return Command.Unreadable # PendingAck can be associated with multiple commands
+    if command == Command.EventDataAck:
+        return Command.EventData
+    if command == Command.EventAck:
+        return Command.Event
+    if command == Command.ActionAck:
+        return Command.Action
 
     result = command-1
-    eprint(f"unknown reply {hex(command)}, returning {hex(result)}")
+    sprint(f"unknown reply {hex(command)}, returning {hex(result)}")
     return result
 
 
@@ -148,7 +222,7 @@ class Packet():
     def __init__(self, cmd=Command(0), request_id=0, address=0, timestamp=0):
         self.command = cmd
         self.request_id = request_id
-        self.address = address
+        self.address = address          # address is a memory location on the target
         self.timestamp = timestamp      # offset in microseconds
         self.value = 0
         self.ipaddress = ""  # packet was part of the conversation with the host at this address
@@ -251,22 +325,34 @@ stats = Statistics()
 
 def print_statistics():
     global stats
-    eprint(f"{stats.VerifiedCommands} commands verified from {len(stats.Addresses)} sources.")
-    eprint(f"Sources: {stats.Addresses}")
+    sprint(f"{stats.VerifiedCommands} commands verified from {len(stats.Addresses)} sources.")
+    sprint(f"Sources: {stats.Addresses}")
 
-    eprint(f"{stats.LateCommands} commands late. (> {GVCP_Parser.Late/1000}ms)")
-    eprint(f"{stats.TimeoutCommands} commands timed out. (> {GVCP_Parser.Timeout/1000}ms)")
+    sprint(f"{stats.LateCommands} commands late. (> {GVCP_Parser.Late/1000}ms)")
+    sprint(f"{stats.TimeoutCommands} commands timed out. (> {GVCP_Parser.Timeout/1000}ms)")
+    sprint("")
 
 
 class GVCP_Parser:
     def __init__(self):
         self.registry = []
 
-    Late = 4000  # 4ms
+    # AcquisitionStop commands are often 'late' because it waits for the image to complete
+    Late = 10000  # 20ms
     Timeout = 100000  # 100ms
 
     last_statistic_print = 0
     new_statistics = False
+
+    retriggerTimeout = 100000  # 100ms
+    triggeredStartAcquisition = 0   # timestamp in micro-seconds.
+
+    latency_min = 0
+    latency_max = 0
+    latency_average = 0     # latency_total / latency_points
+    latency_values = 0      # number of latency values collected
+    latency_total = 0       # sum of latency of all points
+    latency_counter = 0     # counter use to start statistics from 5 values (because of startup behaviour)
 
     def check_reply(self, reply_packet):
         global stats
@@ -275,7 +361,8 @@ class GVCP_Parser:
             age = reply_packet.timestamp - stored_packet.timestamp
             if reply_packet.is_ack_for(stored_packet):
                 if age > GVCP_Parser.Late:
-                    sprint(f"{get_timestamp()} {reply_packet.ipaddress} cmd + reply = OK {stored_packet.command_as_string()} {stored_packet.details()} with request_id {reply_packet.request_id} after {age/1000}ms")
+                    if verbose_report_late:
+                        sprint(f"{get_timestamp()} {reply_packet.ipaddress} cmd + reply = OK {stored_packet.command_as_string()} {stored_packet.details()} with request_id {reply_packet.request_id} after {age/1000}ms")
                     stats.LateCommands = stats.LateCommands + 1
                 else:
                     stats.VerifiedCommands = stats.VerifiedCommands + 1
@@ -295,13 +382,35 @@ class GVCP_Parser:
     def check_command(self, packet):
         for stored_packet in self.registry:
             age = packet.timestamp - stored_packet.timestamp
-            if age > GVCP_Parser.Late:
+            if age > GVCP_Parser.Late and verbose_report_late:
                 msg = f"{get_timestamp()} {stored_packet.ipaddress} command {stored_packet.command_as_string()} {stored_packet.details()}"
                 sprint(f"{msg} [when req {packet.request_id} arrived] still waiting after {age/1000}ms")
 
     def register_command(self, packet):
         self.check_command(packet)
         self.registry += [packet]
+
+    def measureLatency(self, packet):
+        if packet.address == Packet.AcquisitionStart:
+            if (packet.timestamp - self.triggeredStartAcquisition) > self.retriggerTimeout:
+                self.triggeredStartAcquisition = packet.timestamp
+                sprint(f"## {packet.ipaddress:15} triggered StartAcquisition")
+                return
+            self.latency_counter += 1
+            if self.latency_counter < 5:
+                return
+
+            latency = packet.timestamp - self.triggeredStartAcquisition
+            if self.latency_min == 0 or self.latency_min > latency:
+                self.latency_min = latency
+            if self.latency_max == 0 or self.latency_max < latency:
+                self.latency_max = latency
+
+            self.latency_values += 1
+            self.latency_total += latency
+            self.latency_average = self.latency_total / self.latency_values
+
+            sprint(f"## {packet.ipaddress:15} StartAcquisition latency: {latency/1000:.2f}ms (min/max/avg: {self.latency_min/1000:.2f}ms, {self.latency_max/1000:.2f}ms, {self.latency_average/1000:.2f}ms)")
 
     def administer(self, packet):
         if packet.is_heartbeat():
@@ -311,10 +420,15 @@ class GVCP_Parser:
             return
 
         if packet.is_command():
+            # protocol checking administration
             self.register_command(packet)
+
+            if measure_latency:
+                # latency measurement for StartAcquisition commands
+                self.measureLatency(packet)
             return
 
-        eprint(f"{get_timestamp()} unknown packet: {packet.explain()}")
+        sprint(f"{get_timestamp()} unknown packet: {packet.explain()}")
         return
 
     def get_address(self, source_destination):
@@ -328,6 +442,11 @@ class GVCP_Parser:
         return result
 
     def verbose_output(self, values, packet):
+
+        if packet.command == Command.PacketResend:
+            sprint(f"RESEND: {packet.timestamp}: {packet.ipaddress:15} {extra}{packet.details()}")
+            return
+
         if packet.is_heartbeat() and not verbose > 3:
             return
 
@@ -339,14 +458,14 @@ class GVCP_Parser:
         if verbose > 0:
             extra = f"{packet.command_as_string()} "
             if verbose > 1:
-                extra = f"{packet.command_as_string()[:12]} {as_hex(values)} LEN {length} "
+                extra = f"{packet.command_as_string()[-12:]} {as_hex(values)} LEN {length} "
             sprint(f"{packet.timestamp}: {packet.ipaddress:15} {extra}{packet.details()}")
 
     def parse(self, udp_header, source_destination, data_lines):
         udp = remove_empty(split_comma(udp_header))
         timestamp = timestamp_to_microseconds(udp[0])
 
-        ipaddress = self.get_address(source_destination)[:-5]
+        ipaddress = self.get_address(source_destination)
 
         values = []
         for line in data_lines:
@@ -375,6 +494,10 @@ class GVCP_Parser:
 
 def main():
     global verbose
+    global measure_latency
+    global verbose_report_late
+    if "-m" in sys.argv:
+        measure_latency = True
     if "-v" in sys.argv:
         verbose = 1
     if "-vv" in sys.argv:
@@ -385,7 +508,9 @@ def main():
         verbose = 4
     if "-vvvvv" in sys.argv:
         verbose = 5
-    if "-h" in sys.argv:
+    if "-q" in sys.argv:
+        verbose_report_late = False
+    if "-h" in sys.argv or sys.stdin.isatty():
         show_usage()
         return 0
 
@@ -397,7 +522,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        eprint("\ngige-monitor stopped.")
+        eprint("\ngvcp-verifier stopped.")
         print_statistics()
         sys.exit(2)
     except Exception:
